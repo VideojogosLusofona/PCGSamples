@@ -1,0 +1,257 @@
+#include "Common.hlsl"
+#include "raymarch.hlsl"
+//#include "raytrace.hlsl"
+
+#pragma kernel CSMain
+
+RWTexture2D<float4> Result;
+
+// Forward declarations
+float3 TraceAndShade(Ray ray, int maxBounces, float ior);
+
+// Implementations
+
+// Transparent shadows using Beer-Lambert absorption.
+// Returns RGB visibility (1 = fully lit, 0 = fully blocked).
+float3 ShadowVisibility(Ray shadowRay, float maxT, int maxLayers)
+{
+    // Accumulated transmittance along the shadow ray
+    float3 vis = float3(1.0, 1.0, 1.0);
+
+    // Small offset to avoid self-intersections
+    float eps = 1e-3;
+
+    // We track whether the ray is currently inside an absorbing medium.
+    // Start in "air": no absorption.
+    float3 currentAbs = float3(0.0, 0.0, 0.0);
+    float currentIor = 1.0;
+
+    // Remaining distance to the light (shrinks as we march through blockers)
+    float remaining = maxT;
+
+    [loop]
+    for (int layer = 0; layer < maxLayers; layer++)
+    {
+        // Find next intersection along the shadow ray
+        Hit h = TraceNearest(shadowRay, remaining);
+
+        // If nothing hit before the light, apply absorption for the remaining travel and exit
+        if (!h.hit)
+        {
+            // Absorb along the last segment (only matters if we're inside something)
+            vis *= exp(-currentAbs * remaining);
+            break;
+        }
+
+        // Apply absorption from current medium along the traveled segment to this hit
+        vis *= exp(-currentAbs * h.t);
+
+        // Early out if essentially fully blocked
+        if (max(vis.x, max(vis.y, vis.z)) < 0.001)
+            return float3(0.0, 0.0, 0.0);
+
+        // Determine if we are entering or exiting this hit material
+        // Use geometric normal to decide: if ray dir points with normal -> we hit backface -> exiting
+        float3 N = h.normal;
+        bool exiting = (dot(shadowRay.dir, N) > 0.0);
+
+        RTMaterial m = _Materials[h.material];
+
+        // Update medium state *as if we refracted straight through*.
+        // For shadow rays we don't need the refracted direction - just medium membership.
+        if (!exiting)
+        {
+            // entering this material
+            currentAbs = m.absorption;
+            currentIor = max(m.ior, 1.0001);
+        }
+        else
+        {
+            // exiting to air (simple model)
+            currentAbs = float3(0.0, 0.0, 0.0);
+            currentIor = 1.0;
+        }
+
+        // Step forward and continue
+        shadowRay.origin = h.pos + shadowRay.dir * (eps * 4.0);
+
+        remaining -= h.t;
+        if (remaining <= 0.0)
+            break;
+    }
+
+    return saturate(vis);
+}
+
+float3 ComputeLighting(GPULight light, Hit hit)
+{
+    float d = max(0, dot(normalize(light.position - hit.pos), hit.normal));
+    
+    RTMaterial m = _Materials[hit.material];
+    
+    float distance;
+    Ray ray = MakeRayToFrom(hit.pos, light.position, distance);
+    float3 shadowAtten = ShadowVisibility(ray, distance, 4);
+
+    return shadowAtten * d * light.color * m.albedo.xyz * light.intensity;
+}
+
+float3 TraceAndShade(Ray primaryRay, float2 pixel)
+{
+    float3 accum = 0.0;
+
+    WorkRay stack[MAX_RAYS];
+    int sp = 0;
+
+    // push primary
+    stack[sp++] = MakeWorkRay(primaryRay, float3(1, 1, 1), 1.0, 0, float3(0, 0, 0));
+    const float eps = 1e-3;
+
+    while (sp > 0)
+    {
+        WorkRay w = stack[--sp];
+
+        if (w.depth > _MaxBounces)
+            continue;
+        if (max(w.weight.x, max(w.weight.y, w.weight.z)) < 1e-4)
+            continue;
+
+        Hit hit = Trace(w.ray); 
+        
+        if (!hit.hit)
+        {
+            accum += w.weight * _AmbientColor.xyz;
+            continue;
+        }
+
+        float3 transmittance = exp(-w.currentAbsorption * hit.t);
+        float3 wMed = w.weight * transmittance;
+
+        RTMaterial m = _Materials[hit.material];
+
+        // Local lighting (diffuse + emission)
+        float3 surfaceLighting = m.emission * m.albedo.rgb;
+        for (int i = 0; i < _LightCount; i++)
+            surfaceLighting += ComputeLighting(_Lights[i], hit);
+
+        float T = saturate(1.0 - m.albedo.a); // transmission (your convention)
+        float O = 1.0 - T; // opaque portion
+
+        // Stop if we won't spawn more rays
+        if (w.depth == _MaxBounces)
+        {
+            accum += wMed * O * surfaceLighting;
+            continue;
+        }
+
+        // Orient normal against incoming ray
+        float3 N = hit.normal;
+        if (dot(w.ray.dir, N) > 0.0)
+            N = -N;
+
+        float3 V = -w.ray.dir;
+        float cosTheta = saturate(dot(V, N));
+
+        const float eps = 1e-3;
+        float bias = eps * 4.0f;
+
+        // ---------------------- OPAQUE REFLECTION (metals + glossy plastics) ----------------------
+        if (O > 0.0)
+        {
+            // Fresnel F0 for conductors (metallic=1 => colored reflection = albedo)
+            float3 F0 = lerp(float3(0.04, 0.04, 0.04), m.albedo.rgb, saturate(m.metallic));
+            float3 F = FresnelSchlick3(cosTheta, F0);
+
+            // Simple energy split: diffuse gets reduced as spec rises
+            float spec = saturate(max(F.x, max(F.y, F.z)));
+            float diff = saturate(1.0 - spec);
+
+            // Accumulate diffuse (opaque part)
+            accum += wMed * O * diff * surfaceLighting;
+
+            // Spawn glossy reflection rays
+            int Nrefl = max(1, _ReflectionRayCount);
+
+            float3 R = normalize(reflect(w.ray.dir, N));
+            uint rng = Hash((uint) (pixel.x * 1973 + pixel.y * 9277 + w.depth * 26699 + 91137));
+
+            for (int s = 0; s < Nrefl; s++)
+            {
+                if (sp >= MAX_RAYS)
+                    break;
+
+                float3 dir = SampleGlossyDir(R, m.roughness, rng);
+
+                Ray rr;
+                rr.dir = dir;
+                rr.origin = OffsetOut(hit.pos, hit.normal, bias); // OUTWARD
+
+                WorkRay child;
+                child.ray = rr;
+                child.weight = wMed * O * (F / Nrefl);
+                child.currentIor = w.currentIor;
+                child.currentAbsorption = w.currentAbsorption;
+                child.depth = w.depth + 1;
+
+                stack[sp++] = child;
+            }
+        }
+        else
+        {
+            // If fully transmissive, don't add diffuse here.
+            // (If you want foggy/translucent, you'd add a scattering term instead.)
+        }
+
+        // ---------------------- REFRACTION (dielectrics only) ----------------------
+        if (T > 0.0)
+        {
+            // For refraction Fresnel should be dielectric (depends on IOR of media)
+            bool exiting = (dot(w.ray.dir, hit.normal) > 0.0);
+            float n2 = exiting ? 1.0 : max(m.ior, 1.0001);
+
+            float Fd = ComputeFresnel(w.ray.dir, hit.normal, w.currentIor, n2); // scalar Fresnel for glass
+
+            // Reflection for transmissive part (optional but recommended)
+            if (sp < MAX_RAYS)
+            {
+                Ray rRefl = GetReflectedRay(w.ray, hit, eps);
+                rRefl.origin = OffsetOut(hit.pos, hit.normal, bias);
+                
+                stack[sp++] = MakeWorkRay(rRefl, wMed * T * Fd, w.currentIor, w.depth + 1, w.currentAbsorption);
+            }
+
+            // Refraction
+            Ray rRefr;
+            float nextIor;
+            bool refrOk = GetRefractedRay(w.ray, hit, eps, w.currentIor, max(m.ior, 1.0001), rRefr, nextIor);
+            
+            if (refrOk && sp < MAX_RAYS)
+            {
+                // decide entering/exiting
+                bool exiting = (dot(w.ray.dir, hit.normal) > 0.0);
+                rRefr.origin = exiting ? OffsetOut(hit.pos, hit.normal, bias) // leaving object
+                                       : OffsetIn(hit.pos, hit.normal, bias); // entering object
+                
+                float3 nextAbs = exiting ? float3(0, 0, 0) : m.absorption;
+
+                stack[sp++] = MakeWorkRay(rRefr, wMed * T * (1.0 - Fd), nextIor, w.depth + 1, nextAbs);
+            }
+        }
+    }
+
+    return accum;
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint) _Resolution.x || id.y >= (uint) _Resolution.y)
+        return;
+
+    int2 pixel = int2(id.xy);
+
+    Ray ray = MakePrimaryRay(pixel);
+    float3 col = TraceAndShade(ray, pixel);
+
+    Result[pixel] = float4(col, 1.0); // alpha = 1 for UI RawImage
+}
