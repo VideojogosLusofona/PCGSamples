@@ -1,6 +1,6 @@
 #include "Common.hlsl"
-//#include "raytrace.hlsl"
-#include "raymarch.hlsl"
+#include "raytrace.hlsl"
+//#include "raymarch.hlsl"
 
 #pragma kernel CSMain
 
