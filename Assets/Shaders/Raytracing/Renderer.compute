@@ -1,6 +1,6 @@
 #include "Common.hlsl"
-#include "raymarch.hlsl"
 //#include "raytrace.hlsl"
+#include "raymarch.hlsl"
 
 #pragma kernel CSMain
 
@@ -11,87 +11,20 @@ float3 TraceAndShade(Ray ray, int maxBounces, float ior);
 
 // Implementations
 
-// Transparent shadows using Beer-Lambert absorption.
-// Returns RGB visibility (1 = fully lit, 0 = fully blocked).
-float3 ShadowVisibility(Ray shadowRay, float maxT, int maxLayers)
-{
-    // Accumulated transmittance along the shadow ray
-    float3 vis = float3(1.0, 1.0, 1.0);
-
-    // Small offset to avoid self-intersections
-    float eps = 1e-3;
-
-    // We track whether the ray is currently inside an absorbing medium.
-    // Start in "air": no absorption.
-    float3 currentAbs = float3(0.0, 0.0, 0.0);
-    float currentIor = 1.0;
-
-    // Remaining distance to the light (shrinks as we march through blockers)
-    float remaining = maxT;
-
-    [loop]
-    for (int layer = 0; layer < maxLayers; layer++)
-    {
-        // Find next intersection along the shadow ray
-        Hit h = TraceNearest(shadowRay, remaining);
-
-        // If nothing hit before the light, apply absorption for the remaining travel and exit
-        if (!h.hit)
-        {
-            // Absorb along the last segment (only matters if we're inside something)
-            vis *= exp(-currentAbs * remaining);
-            break;
-        }
-
-        // Apply absorption from current medium along the traveled segment to this hit
-        vis *= exp(-currentAbs * h.t);
-
-        // Early out if essentially fully blocked
-        if (max(vis.x, max(vis.y, vis.z)) < 0.001)
-            return float3(0.0, 0.0, 0.0);
-
-        // Determine if we are entering or exiting this hit material
-        // Use geometric normal to decide: if ray dir points with normal -> we hit backface -> exiting
-        float3 N = h.normal;
-        bool exiting = (dot(shadowRay.dir, N) > 0.0);
-
-        RTMaterial m = _Materials[h.material];
-
-        // Update medium state *as if we refracted straight through*.
-        // For shadow rays we don't need the refracted direction - just medium membership.
-        if (!exiting)
-        {
-            // entering this material
-            currentAbs = m.absorption;
-            currentIor = max(m.ior, 1.0001);
-        }
-        else
-        {
-            // exiting to air (simple model)
-            currentAbs = float3(0.0, 0.0, 0.0);
-            currentIor = 1.0;
-        }
-
-        // Step forward and continue
-        shadowRay.origin = h.pos + shadowRay.dir * (eps * 4.0);
-
-        remaining -= h.t;
-        if (remaining <= 0.0)
-            break;
-    }
-
-    return saturate(vis);
-}
-
 float3 ComputeLighting(GPULight light, Hit hit)
 {
     float d = max(0, dot(normalize(light.position - hit.pos), hit.normal));
     
     RTMaterial m = _Materials[hit.material];
     
-    float distance;
-    Ray ray = MakeRayToFrom(hit.pos, light.position, distance);
-    float3 shadowAtten = ShadowVisibility(ray, distance, 4);
+    float3  shadowAtten = 0.0f;
+    float   distance;
+    Ray     ray = MakeRayToFrom(hit.pos, light.position, distance);
+    
+    if (distance < light.range)
+    {
+        shadowAtten = ShadowVisibility(ray, distance, 4, light.size);
+    }
 
     return shadowAtten * d * light.color * m.albedo.xyz * light.intensity;
 }

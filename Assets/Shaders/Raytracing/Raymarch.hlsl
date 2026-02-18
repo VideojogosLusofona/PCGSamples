@@ -20,26 +20,65 @@ struct SdfSample
     int   matId;
 };
 
+#define MAX_PRIMITIVES 32
+
 SdfSample SceneSDF(float3 p)
 {
     SdfSample ret;
     ret.dist = RM_MAX_DIST;
     ret.matId = -1;
 
+    float distanceCache[MAX_PRIMITIVES];
+
     for (int i = 0; i < _PrimitiveCount; i++)
     {
         GPUPrimitive primitive = _Primitives[i];
 
+        uint typeU = (uint)primitive.type;
+
+        bool isArg = (typeU & 0x80000000u) != 0u;
+
+        int primType = (int)(typeU & 0xFFFFu);
+
         float d = RM_MAX_DIST;
-        if (primitive.type == PRIM_SPHERE)
+        if (primType == PRIM_SPHERE)
         {
             d = sdSphere(p, primitive.data0.xyz, primitive.data0.w);
         }
-        else if (primitive.type == PRIM_PLANE)
+        else if (primType == PRIM_PLANE)
+        {
+            d = sdPlane(p, primitive.data0.xyz, primitive.data0.w);
+        }
+        else if (primType == PRIM_DUALSIDEDPLANE)
         {
             d = sdDoubleSidedPlane(p, primitive.data0.xyz, primitive.data0.w);
         }
-        if (d < ret.dist)
+        else if (primType == PRIM_UNION)
+        {
+            d = opUnion(distanceCache[primitive.arg1], distanceCache[primitive.arg2]);
+        }
+        else if (primType == PRIM_INTERSECT)
+        {
+            d = opIntersection(distanceCache[primitive.arg1], distanceCache[primitive.arg2]);
+        }
+        else if (primType == PRIM_SUBTRACT)
+        {
+            d = opSubtraction(distanceCache[primitive.arg1], distanceCache[primitive.arg2]);
+        }
+        else if (primType == PRIM_SMOOTH_UNION)
+        {
+            d = opSmoothUnion(distanceCache[primitive.arg1], distanceCache[primitive.arg2], primitive.data0.x);
+        }
+        else if (primType == PRIM_SMOOTH_INTERSECT)
+        {
+            d = opSmoothIntersection(distanceCache[primitive.arg1], distanceCache[primitive.arg2], primitive.data0.x);
+        }
+        else if (primType == PRIM_SMOOTH_SUBTRACT)
+        {
+            d = opSmoothSubtraction(distanceCache[primitive.arg1], distanceCache[primitive.arg2], primitive.data0.x);
+        }
+        distanceCache[i] = d;
+        if ((d < ret.dist) && (!isArg))
         {
             ret.dist = d;
             ret.matId = primitive.material;
@@ -98,9 +137,9 @@ Hit Trace(Ray ray)
 
             // ensure outward orientation
             float3 n = EstimateSDFNormal(p);
-            float d0 = SceneSDF(p).dist;
+            // Flip if needed (ensure outward)
             float d1 = SceneSDF(p + n * RM_NORMAL_EPS).dist;
-            if (d1 < d0) n = -n;
+            if (d1 < d) n = -n;
 
             outHit.normal = n;
 
@@ -150,9 +189,9 @@ Hit TraceNearest(Ray ray, float maxT)
 
             // ensure outward orientation
             float3 n = EstimateSDFNormal(p);
-            float d0 = SceneSDF(p).dist;
+            // Flip if needed (ensure outward)
             float d1 = SceneSDF(p + n * RM_NORMAL_EPS).dist;
-            if (d1 < d0) n = -n;
+            if (d1 < d) n = -n;
 
             outHit.normal = n;
 
@@ -166,6 +205,61 @@ Hit TraceNearest(Ray ray, float maxT)
     }
 
     return outHit;
+}
+
+// ------------------------------------------------------------
+// Soft shadows (IQ-style) for raymarching / SDF sphere tracing.
+// Same signature as the raytracing version.
+//
+// Returns RGB visibility in [0..1] (grayscale replicated).
+// 1 = fully visible, 0 = fully occluded.
+// ------------------------------------------------------------
+float3 ShadowVisibility(Ray shadowRay, float maxT, int maxLayers, float lightSize)
+{
+    // Small origin offset to avoid self-shadow acne.
+    // (We bias along the ray direction because we don't have the surface normal here.)
+    float t = RM_EPSILON * 8.0;
+
+    // "k" controls softness: higher -> sharper shadows, lower -> softer.
+    // Typical IQ values: 8..32 depending on scale.
+    const float k = 4.0f / lightSize;
+
+    float visibility = 1.0;
+
+    // Your caller passes maxLayers=4 in the raytracer.
+    // For soft shadows we need *many* samples, so interpret maxLayers as a quality knob.
+    int steps = clamp(maxLayers * 32, 16, RM_MAX_STEPS); // 4 -> 128 (your RM_MAX_STEPS)
+
+    float tLimit = min(maxT, RM_MAX_DIST);
+
+    [loop]
+    for (int i = 0; i < steps; i++)
+    {
+        if (t >= tLimit) break;
+
+        float3 p = shadowRay.origin + shadowRay.dir * t;
+        float h = SceneSDF(p).dist;
+
+        // If we're extremely close to geometry, consider it blocked.
+        if (h <= RM_EPSILON)
+            return float3(0.0, 0.0, 0.0);
+
+        // IQ soft shadow visibility update:
+        // visibility = min(visibility, k*h/t)
+        visibility = min(visibility, k * h / max(t, 1e-4));
+
+        // Advance: sphere tracing step (clamped to avoid tiny steps causing stalls)
+        // Tweak minStep if you see banding vs performance issues.
+        float stepLen = clamp(h, 0.01, 1.0);
+        t += stepLen;
+
+        // Early out if basically fully shadowed.
+        if (visibility <= 0.001)
+            return float3(0.0, 0.0, 0.0);
+    }
+
+    visibility = saturate(visibility);
+    return float3(visibility, visibility, visibility);
 }
 
 #endif // RAYMARCH_HLSL

@@ -1,17 +1,20 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 public class RTSphere : RTPrimitive
 {
     [SerializeField] private float radius = 1.0f;
 
-    public override GPUPrimitive GetGPUPrimitive()
+    public override int GatherPrimitive(List<GPUPrimitive> primitives)
     {
-        return new GPUPrimitive
+        var tmp = new GPUPrimitive
         {
-            type = GPUPrimitiveType.Sphere,
+            type = (int)GPUPrimitiveType.Sphere,
             material = 0,
             data0 = new Vector4(transform.position.x, transform.position.y, transform.position.z, radius)
         };
+        primitives.Add(tmp);
+        return primitives.Count - 1;
     }
 
     private void OnDrawGizmos()

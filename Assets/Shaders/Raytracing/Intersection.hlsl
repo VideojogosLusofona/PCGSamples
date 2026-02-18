@@ -41,6 +41,40 @@ bool IntersectPlane(Ray ray, float3 n, float d, out float t, out float3 nrm)
     n = normalize(n);
     float denom = dot(n, ray.dir);
 
+    // Reject parallel rays
+    if (abs(denom) < 1e-6)
+    {
+        t = 0; nrm = 0;
+        return false;
+    }
+
+    // Reject backface hits (single-sided)
+    if (denom >= 0.0)
+    {
+        t = 0; nrm = 0;
+        return false;
+    }
+
+    float tt = -(dot(n, ray.origin) + d) / denom;
+
+    if (tt <= 1e-4)
+    {
+        t = 0; nrm = 0;
+        return false;
+    }
+
+    t = tt;
+    nrm = n; // no need to flip anymore
+
+    return true;
+}
+
+
+bool IntersectPlaneDualSided(Ray ray, float3 n, float d, out float t, out float3 nrm)
+{
+    n = normalize(n);
+    float denom = dot(n, ray.dir);
+
     if (abs(denom) < 1e-6)
     {
         t = 0; nrm = 0;

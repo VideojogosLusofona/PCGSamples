@@ -1,16 +1,21 @@
-using UnityEditor.ShaderGraph.Internal;
+using System.Collections.Generic;
 using UnityEngine;
 
 public class RTPlane : RTPrimitive
 {
-    public override GPUPrimitive GetGPUPrimitive()
+    [SerializeField] private bool dualSided = true;
+
+    public override int GatherPrimitive(List<GPUPrimitive> primitives)
     {
-        return new GPUPrimitive()
+        var tmp = new GPUPrimitive()
         {
-            type = GPUPrimitiveType.Plane,
+            type = (int)((dualSided) ? (GPUPrimitiveType.DualSidedPlane) : (GPUPrimitiveType.Plane)),
             material = 0,
             data0 = new Vector4(transform.up.x, transform.up.y, transform.up.z, -Vector3.Dot(transform.up, transform.position))
         };
+        primitives.Add(tmp);
+
+        return primitives.Count - 1;
     }
 
     private void OnDrawGizmos()

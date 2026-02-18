@@ -2,8 +2,6 @@ using NaughtyAttributes;
 using System.Runtime.InteropServices;
 using System.Collections.Generic;
 using UnityEngine;
-using Unity.VisualScripting;
-using System;
 
 [ExecuteAlways]
 public class Raytrace : MonoBehaviour
@@ -48,9 +46,15 @@ public class Raytrace : MonoBehaviour
         var primitivesObj = FindObjectsByType<RTPrimitive>(FindObjectsSortMode.None);
         foreach (var primitive in primitivesObj)
         {
-            var p = primitive.GetGPUPrimitive();
-            p.material = materials.Count;
-            primitives.Add(p);
+            if (primitive.isArg) continue;
+
+            var idx = primitive.GatherPrimitive(primitives);
+            if (idx >= 0)
+            {
+                var tmp = primitives[idx];
+                tmp.material = materials.Count;
+                primitives[idx] = tmp;
+            }
             materials.Add(primitive.GetMaterial());
         }
 

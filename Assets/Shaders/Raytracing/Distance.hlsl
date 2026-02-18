@@ -30,10 +30,30 @@ float opUnion(float a, float b) { return min(a, b); }
 float opIntersection(float a, float b) { return max(a, b); }
 float opSubtraction(float a, float b) { return max(a, -b); }
 
-// Repeat space with period (component-wise). Useful for tiling primitives.
-float3 opRepeat(float3 p, float3 period)
+float smin(float a, float b, float k)
 {
-    return p - period * round(p / period);
+    float h = saturate(0.5 + 0.5 * (b - a) / k);
+    return lerp(b, a, h) - k * h * (1.0 - h);
+}
+
+float smax(float a, float b, float k)
+{
+    return -smin(-a, -b, k);
+}
+
+float opSmoothUnion(float a, float b, float k)
+{
+    return smin(a, b, k);
+}
+
+float opSmoothIntersection(float a, float b, float k)
+{
+    return smax(a, b, k);
+}
+
+float opSmoothSubtraction(float a, float b, float k)
+{
+    return smax(a, -b, k);
 }
 
 #endif // DISTANCE_HLSL

@@ -19,15 +19,20 @@ struct RTMaterial
 // ---------------------- Primitive encoding ----------------------
 static const int PRIM_SPHERE = 0;
 static const int PRIM_PLANE = 1;
+static const int PRIM_DUALSIDEDPLANE = 2;
+static const int PRIM_UNION = 3;
+static const int PRIM_INTERSECT = 4;
+static const int PRIM_SUBTRACT = 5;
+static const int PRIM_SMOOTH_UNION = 6;
+static const int PRIM_SMOOTH_INTERSECT = 7;
+static const int PRIM_SMOOTH_SUBTRACT = 8;
 
 struct GPUPrimitive
 {
-    int     type;       // PRIM_*
-    int     material;   // index into _Materials
-    float2  pad0;
-
-    // sphere: (cx,cy,cz,r)
-    // plane : (nx,ny,nz,d) where dot(n, p) + d = 0
+    int     type;
+    int     material;
+    int     arg1;
+    int     arg2;
     float4  data0;
 };
 
@@ -38,6 +43,7 @@ struct GPULight
     float    intensity;
     float3   color;
     float    range;
+    float    size;
 };
 
 // ---------------------- Camera parameters (set from C#) ----------------------
